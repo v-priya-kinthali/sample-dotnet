@@ -1,9 +1,9 @@
 name: Test msbuild regex truncation
 
 on:
-  push:
-    branches:
-      - test-588
+  # push:
+  #   branches:
+  #     - test-588
   workflow_dispatch:
 
 jobs:

@@ -1,0 +1,404 @@
+name: Test check-latest (PR #774)
+
+on:
+  push:
+    branches:
+      - test-588
+  workflow_dispatch:
+
+jobs:
+
+  # 1. REGRESSION BASELINE — no check-latest input at all.
+  #    Must behave exactly like main: resolve + install the newest 8.0.x online.
+  baseline-default:
+    runs-on: ${{ matrix.os }}
+    strategy: { fail-fast: false, matrix: { os: [ubuntu-latest, windows-latest, macos-latest] } }
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { dotnet-version: '8.0.x' }
+      - run: echo "output=${{ steps.s.outputs.dotnet-version }}"; dotnet --version
+
+  # 2. REGRESSION — check-latest explicitly true. Identical to job 1.
+  explicit-true:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { dotnet-version: '8.0.x', check-latest: true }
+      - run: echo "output=${{ steps.s.outputs.dotnet-version }}"
+
+  # 3. CORE HAPPY PATH — install an older pinned SDK, then ask for a floating
+  #    spec with check-latest:false. Must reuse the older one, zero downloads.
+  reuse-floating:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: '8.0.100' }
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { dotnet-version: '8.0.x', check-latest: false }
+      - run: |
+          test "${{ steps.s.outputs.dotnet-version }}" = "8.0.100" \
+            || { echo "FAIL: got ${{ steps.s.outputs.dotnet-version }}"; exit 1; }
+
+  # 4. EXACT PIN reuse — A.B.C request matching an installed SDK exactly.
+  reuse-exact-pin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: '8.0.404' }
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { dotnet-version: '8.0.404', check-latest: false }
+      - run: test "${{ steps.s.outputs.dotnet-version }}" = "8.0.404" || exit 1
+
+  # 5. FEATURE BAND reuse — A.B.Cxx must match only inside its own band.
+  reuse-feature-band:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: '8.0.100' }
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { dotnet-version: '8.0.1xx', check-latest: false }
+      - run: test "${{ steps.s.outputs.dotnet-version }}" = "8.0.100" || exit 1
+
+  # 6. BAND MISS → ONLINE FALLBACK — only 8.0.1xx is local, 8.0.4xx requested.
+  #    Must NOT reuse; must download and report a 8.0.4xx SDK.
+  fallback-band-miss:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: '8.0.100' }
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { dotnet-version: '8.0.4xx', check-latest: false }
+      - run: |
+          case "${{ steps.s.outputs.dotnet-version }}" in 8.0.4*) ;; *) exit 1;; esac
+
+  # 7. NOTHING LOCAL → ONLINE FALLBACK — request a major that is not preinstalled.
+  fallback-nothing-local:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { dotnet-version: '7.0.x', check-latest: false }
+      - run: |
+          case "${{ steps.s.outputs.dotnet-version }}" in 7.0.*) ;; *) exit 1;; esac
+
+  # 8. MAJOR-ONLY spec (8, 8.x, 8.X, 8.*) — all must reuse the local 8.0 SDK.
+  reuse-major-only:
+    runs-on: ubuntu-latest
+    strategy: { fail-fast: false, matrix: { spec: ['8', '8.x', '8.X', '8.*'] } }
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: '8.0.100' }
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { dotnet-version: '${{ matrix.spec }}', check-latest: false }
+      - run: test "${{ steps.s.outputs.dotnet-version }}" = "8.0.100" || exit 1
+
+  # 9. BARE WILDCARD — 'x' must never guess locally; always installs online (LTS).
+  wildcard-goes-online:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: '8.0.100' }
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { dotnet-version: 'x', check-latest: false }
+      - run: echo "online-resolved=${{ steps.s.outputs.dotnet-version }}"
+
+  # 10. latest + no channel — must pick the HIGHEST locally installed SDK.
+  latest-no-channel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: "8.0.100\n9.0.100" }
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { dotnet-version: 'latest', check-latest: false }
+      - run: test "${{ steps.s.outputs.dotnet-version }}" = "9.0.100" || exit 1
+
+  # 11. latest + numeric channel — must reuse the SDK of THAT channel only.
+  latest-numeric-channel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: "8.0.100\n9.0.100" }
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { dotnet-version: 'latest', dotnet-channel: '8.0', check-latest: false }
+      - run: test "${{ steps.s.outputs.dotnet-version }}" = "8.0.100" || exit 1
+
+  # 12. latest + LTS/STS channel — documented to ALWAYS install online.
+  latest-lts-channel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: '8.0.100' }
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { dotnet-version: 'latest', dotnet-channel: 'LTS', check-latest: false }
+      - run: echo "online-resolved=${{ steps.s.outputs.dotnet-version }}"
+
+  # 13. CROSS-ARCH — architecture != runner arch must bypass reuse entirely.
+  cross-arch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: '8.0.100' }
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { dotnet-version: '8.0.x', architecture: 'arm64', check-latest: false }
+      - run: echo "installed-online=${{ steps.s.outputs.dotnet-version }}"
+
+  # 14. SAME-ARCH explicit architecture — NOT cross-arch, so reuse still applies.
+  same-arch-explicit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: '8.0.100' }
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { dotnet-version: '8.0.x', architecture: 'x64', check-latest: false }
+      - run: test "${{ steps.s.outputs.dotnet-version }}" = "8.0.100" || exit 1
+
+  # 15. QUALITY=preview, only GA local — must not reuse; installs a preview online.
+  quality-preview-no-local:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: '9.0.100' }
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { dotnet-version: '10.0.x', dotnet-quality: 'preview', check-latest: false }
+      - run: echo "online-resolved=${{ steps.s.outputs.dotnet-version }}"
+
+  # 16. QUALITY ignored for GA-only — no quality set must never pick a prerelease.
+  quality-ga-only:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: '8.0.100' }
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { dotnet-version: '8.0.x', check-latest: false }
+      - run: test "${{ steps.s.outputs.dotnet-version }}" = "8.0.100" || exit 1
+
+  # 17. ENV VAR drives the option when the input is omitted (the ADS scenario).
+  env-var-false:
+    runs-on: ubuntu-latest
+    env: { DOTNET_CHECK_LATEST: 'false' }
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: '8.0.100' }
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { dotnet-version: '8.0.x' }
+      - run: test "${{ steps.s.outputs.dotnet-version }}" = "8.0.100" || exit 1
+
+  # 18. ENV VAR case-insensitivity — FALSE / False must work like false.
+  env-var-case:
+    runs-on: ubuntu-latest
+    strategy: { fail-fast: false, matrix: { val: ['FALSE', 'False'] } }
+    env: { DOTNET_CHECK_LATEST: '${{ matrix.val }}' }
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: '8.0.100' }
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { dotnet-version: '8.0.x' }
+      - run: test "${{ steps.s.outputs.dotnet-version }}" = "8.0.100" || exit 1
+
+  # 19. INPUT WINS over the env var.
+  env-var-overridden-by-input:
+    runs-on: ubuntu-latest
+    env: { DOTNET_CHECK_LATEST: 'false' }
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: '8.0.100' }
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { dotnet-version: '8.0.x', check-latest: true }
+      - run: |
+          test "${{ steps.s.outputs.dotnet-version }}" != "8.0.100" \
+            || { echo "FAIL: reused despite check-latest:true"; exit 1; }
+
+  # 20. INVALID ENV VAR — must warn and fall back to true (job must still pass).
+  env-var-invalid:
+    runs-on: ubuntu-latest
+    env: { DOTNET_CHECK_LATEST: 'yes' }
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { dotnet-version: '8.0.x' }
+      - run: echo "warned-and-installed-online=${{ steps.s.outputs.dotnet-version }}"
+
+  # 21. INVALID INPUT — getBooleanInput throws; this job is EXPECTED TO FAIL.
+  invalid-input-expected-fail:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: '8.0.x', check-latest: 'yes' }
+
+  # 22. INVALID VERSION + check-latest:false — must still fail with the same
+  #     "supplied in invalid format" error as main (reuse must not swallow it).
+  invalid-version-expected-fail:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: '08.0.x', check-latest: false }
+
+  # 23. A.B.Cxx below .NET 5 + check-latest:false — must fail, not reuse.
+  band-below-net5-expected-fail:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: '3.1.1xx', check-latest: false }
+
+  # 24. global.json, NO rollForward — the new implicit 'patch' floor.
+  #     Note: 8.0.105 may be reused even though 8.0.100 was declared.
+  globaljson-no-rollforward:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: '8.0.100' }
+      - run: |
+          echo '{ "sdk": { "version": "8.0.100" } }' > global.json
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { global-json-file: 'global.json', check-latest: false }
+      - run: test "${{ steps.s.outputs.dotnet-version }}" = "8.0.100" || exit 1
+
+  # 25. global.json rollForward: latestFeature — highest band of 8.0 is reused.
+  globaljson-latest-feature:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: "8.0.100\n8.0.404" }
+      - run: |
+          echo '{ "sdk": { "version": "8.0.100", "rollForward": "latestFeature" } }' > global.json
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { global-json-file: 'global.json', check-latest: false }
+      - run: test "${{ steps.s.outputs.dotnet-version }}" = "8.0.404" || exit 1
+
+  # 26. global.json rollForward: feature — NEAREST higher band, not the highest.
+  globaljson-feature:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: "8.0.200\n8.0.404" }
+      - run: |
+          echo '{ "sdk": { "version": "8.0.100", "rollForward": "feature" } }' > global.json
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { global-json-file: 'global.json', check-latest: false }
+      - run: |
+          test "${{ steps.s.outputs.dotnet-version }}" = "8.0.204" || echo "check nearest-band result: ${{ steps.s.outputs.dotnet-version }}"
+
+  # 27. global.json rollForward: disable — exact match or online, nothing else.
+  globaljson-disable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: '8.0.404' }
+      - run: |
+          echo '{ "sdk": { "version": "8.0.100", "rollForward": "disable" } }' > global.json
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { global-json-file: 'global.json', check-latest: false }
+      - run: test "${{ steps.s.outputs.dotnet-version }}" = "8.0.100" || exit 1
+
+  # 28. global.json rollForward: latestMajor — highest local SDK across majors.
+  globaljson-latest-major:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: "8.0.404\n9.0.100" }
+      - run: |
+          echo '{ "sdk": { "version": "8.0.100", "rollForward": "latestMajor" } }' > global.json
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { global-json-file: 'global.json', check-latest: false }
+      - run: test "${{ steps.s.outputs.dotnet-version }}" = "9.0.100" || exit 1
+
+  # 29. global.json floor NOT satisfied locally — must fall back online.
+  globaljson-floor-miss:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: '8.0.100' }
+      - run: |
+          echo '{ "sdk": { "version": "8.0.400", "rollForward": "latestFeature" } }' > global.json
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { global-json-file: 'global.json', check-latest: false }
+      - run: |
+          case "${{ steps.s.outputs.dotnet-version }}" in 8.0.4*) ;; *) exit 1;; esac
+
+  # 30. MULTILINE dotnet-version with check-latest:false — one reusable, one not.
+  multiline-mixed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: '8.0.100' }
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { dotnet-version: "8.0.x\n7.0.x", check-latest: false }
+      - run: dotnet --list-sdks
+
+  # 31. CUSTOM DOTNET_INSTALL_DIR — reuse must scan the custom dir, not the default.
+  custom-install-dir:
+    runs-on: ubuntu-latest
+    env: { DOTNET_INSTALL_DIR: '${{ github.workspace }}/.dotnet-custom' }
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: '8.0.100' }
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { dotnet-version: '8.0.x', check-latest: false }
+      - run: test "${{ steps.s.outputs.dotnet-version }}" = "8.0.100" || exit 1
+
+  # 32. EMPTY custom install dir — nothing to reuse, must go online cleanly.
+  empty-install-dir:
+    runs-on: ubuntu-latest
+    env: { DOTNET_INSTALL_DIR: '${{ github.workspace }}/.dotnet-empty' }
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { dotnet-version: '8.0.x', check-latest: false }
+      - run: |
+          case "${{ steps.s.outputs.dotnet-version }}" in 8.0.*) ;; *) exit 1;; esac
+
+  # 33. REUSE + cache — cache still uses the network even when the SDK is reused.
+  reuse-with-cache:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: '8.0.100' }
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { dotnet-version: '8.0.x', check-latest: false, cache: true }
+      - run: echo "cache-hit=${{ steps.s.outputs.cache-hit }}"
+
+  # 34. CROSS-PLATFORM smoke — the core reuse path on all three OSes.
+  reuse-cross-platform:
+    runs-on: ${{ matrix.os }}
+    strategy: { fail-fast: false, matrix: { os: [ubuntu-latest, windows-latest, macos-latest] } }
+    steps:
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        with: { dotnet-version: '8.0.100' }
+      - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
+        id: s
+        with: { dotnet-version: '8.0.x', check-latest: false }
+      - shell: pwsh
+        run: |
+          if ('${{ steps.s.outputs.dotnet-version }}' -ne '8.0.100') { throw 'not reused' }
+          dotnet --list-sdks
