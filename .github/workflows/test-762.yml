@@ -17,7 +17,18 @@ jobs:
       - uses: v-mahabaleshwars/setup-dotnet@feature/762-check-latest-input
         id: s
         with: { dotnet-version: '8.0.x' }
-      - run: echo "output=${{ steps.s.outputs.dotnet-version }}"; dotnet --version
+      - shell: pwsh
+        run: |
+          $resolved = '${{ steps.s.outputs.dotnet-version }}'
+          @{ sdk = @{ version = $resolved; rollForward = 'disable' } } |
+            ConvertTo-Json -Depth 3 |
+            Set-Content global.json
+          $actual = dotnet --version
+          Write-Output "output=$resolved"
+          Write-Output "dotnet-version=$actual"
+          if ($actual -ne $resolved) {
+            throw "Expected SDK $resolved, got $actual"
+          }
 
   # 2. REGRESSION — check-latest explicitly true. Identical to job 1.
   explicit-true:
